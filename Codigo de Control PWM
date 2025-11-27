@@ -1,0 +1,117 @@
+/*-------------------------------------------------------
+   Controlador SEPIC con Arduino UNO (ATmega328)
+   - PWM alta frecuencia en D9 (OC1A) -> HCPL-3120
+   - Lectura de tensión de salida en A0 (AD0)
+   - Control PI sencillo para regular a 5 V
+
+
+const byte PIN_PWM  = 9;     // OC1A -> Driver HCPL-3120
+const byte PIN_VOUT = A0;    // AD0   -> divisor resistivo de salida
+
+// Parámetros del sistema
+const float VREF_ADC   = 5.0;    // referencia ADC (DEFAULT = AVcc)
+const float K_DIV      = 0.6;    // Vadc = K_DIV * Vout  (10k / (10k+15k) = 0.6)
+const float VOUT_REF   = 5.0;    // tensión deseada en la salida (V)
+
+// Parámetros del control PI
+const float Kp = 40.0;       // Ganancia proporcional
+const float Ki = 200.0;      // Ganancia integral (ya incluye Ts)
+float integrador = 0.0;
+
+// Tiempo de muestreo del control (en microsegundos)
+const unsigned long Ts_us = 1000;   // 1 ms -> 1 kHz de actualización
+unsigned long t_anterior = 0;
+
+// Función para leer Vout (en voltios), con promediado
+float leer_Vout() {
+  const uint8_t N_MUESTRAS = 16;
+  unsigned int suma = 0;
+
+  for (uint8_t i = 0; i < N_MUESTRAS; i++) {
+    suma += analogRead(PIN_VOUT);
+  }
+
+  float adc_med = (float)suma / N_MUESTRAS;              // valor medio ADC
+  float Vadc    = adc_med * VREF_ADC / 1023.0;           // tensión en AD0
+  float Vout    = Vadc / K_DIV;                          // salida real
+
+  return Vout;
+}
+
+// Configurar Timer1 para PWM de ~31.25 kHz en OC1A (pin 9)
+void configurarPWM_Timer1() {
+  pinMode(PIN_PWM, OUTPUT);
+
+  // Apagar Timer1 mientras configuramos
+  TCCR1A = 0;
+  TCCR1B = 0;
+
+  // Modo: Phase Correct PWM, 8-bit (WGM10 = 1)
+  // TOP = 0x00FF => f_PWM = Fclk / (2 * N * 256)
+  // Con Fclk = 16 MHz y N = 1 => f_PWM ≈ 31.25 kHz
+  TCCR1A |= (1 << WGM10);
+
+  // Salida no inversora en OC1A (COM1A1 = 1)
+  TCCR1A |= (1 << COM1A1);
+
+  // Prescaler = 1 (CS10 = 1)
+  TCCR1B |= (1 << CS10);
+
+  // Duty inicial = 0 (apagado)
+  OCR1A = 0;
+}
+
+// Fijar duty cycle (0–255)
+void setDuty(uint8_t duty) {
+  OCR1A = duty;
+}
+
+void setup() {
+  configurarPWM_Timer1();
+
+  analogReference(DEFAULT);        // referencia ADC = AVcc (5 V)
+  analogRead(PIN_VOUT);            // lectura "dummy" para estabilizar el ADC
+
+  Serial.begin(9600);              // opcional: para monitoreo
+  t_anterior = micros();
+}
+
+void loop() {
+  unsigned long t_actual = micros();
+
+  // Ejecutar control cada Ts_us
+  if (t_actual - t_anterior >= Ts_us) {
+    t_anterior += Ts_us;
+
+    // 1) Medir tensión de salida
+    float Vout = leer_Vout();
+
+    // 2) Calcular error
+    float error = VOUT_REF - Vout;
+
+    // 3) Integrar el error (parte integral)
+    integrador += Ki * error;
+
+    // Limitar integrador para evitar "windup"
+    if (integrador > 255.0) integrador = 255.0;
+    if (integrador <   0.0) integrador =   0.0;
+
+    // 4) Acción de control (PI discreto)
+    float u = Kp * error + integrador;
+
+    // 5) Convertir a duty 0–255 y saturar
+    int duty = (int)u;
+    if (duty > 255) duty = 255;
+    if (duty <   0) duty = 0;
+
+    setDuty((uint8_t)duty);
+
+    // 6) (Opcional) Enviar datos por serial para ver cómo se comporta
+    Serial.print("Vout = ");
+    Serial.print(Vout);
+    Serial.print(" V\tDuty = ");
+    Serial.println(duty);
+  }
+
+  // Aquí NO hacemos nada más; el PWM lo genera el hardware (Timer1)
+}
